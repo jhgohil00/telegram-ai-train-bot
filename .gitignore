@@ -1,5 +1,0 @@
-__pycache__/
-*.pyc
-ai_train.db
-behavior_model.json
-.env
