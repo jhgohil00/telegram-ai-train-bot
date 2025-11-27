@@ -327,12 +327,3 @@ if __name__ == '__main__':
         
         print("🤖 TRAINER BOT LIVE (Press Ctrl+C to stop)")
         app.run_polling()
-```
-
-### Instructions for You
-1.  **Replace:** Paste this over your existing code in `train_bot.py` (or `main.py` if you renamed it).
-2.  **Commit & Push:** Send it to GitHub.
-3.  **Verify Render:** Check the Render logs. If you see `✅ Database Tables Ready`, you are good to go.
-4.  **Check Keys:** Ensure `GROQ_API_KEY` and `DATABASE_URL` are correct in Render settings.
-
-This code opens and closes the database connection cleanly every single time, so the "SSL connection closed" error will disappear.
