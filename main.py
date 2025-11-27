@@ -70,8 +70,6 @@ def get_random_samples(count=10):
 # ==============================================================================
 # 💾 DATABASE (ROBUST CONNECTION HANDLING)
 # ==============================================================================
-# We define the connection getter inside functions to avoid "Stale Connection" errors.
-
 def get_db_connection():
     """Creates a fresh connection to the database."""
     try:
@@ -131,7 +129,6 @@ def update_user(user_id, col, val):
     if not conn: return
     try:
         c = conn.cursor()
-        # We whitelist columns to prevent injection since table names can't be parameterized
         if col not in ['my_gender', 'ai_gender', 'interests', 'is_chatting']:
             return
         
@@ -182,22 +179,22 @@ async def get_ai_reply(history, ai_gender, interests):
     messages = [{"role": "system", "content": system_prompt}] + history[-6:]
 
     try:
+        # 🛑 CHANGED MODEL HERE: From "llama3-8b-8192" to "llama-3.3-70b-versatile"
         completion = client.chat.completions.create(
             messages=messages, 
-            model="llama3-8b-8192", 
+            model="llama-3.3-70b-versatile",  # <--- UPDATED MODEL
             temperature=1.0, 
             max_tokens=60
         )
         return completion.choices[0].message.content.lower().replace('"', '').strip()
     except Exception as e:
         logger.error(f"❌ AI Error: {e}")
-        return "lag lol"
+        return f"AI Error: {str(e)[:20]}..." # Short error for user to see
 
 # ==============================================================================
 # 🎮 BOT LOGIC
 # ==============================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Load data on start just in case
     load_chat_logs()
     init_db()
     
@@ -212,11 +209,10 @@ async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     update_user(user_id, "is_chatting", 1)
     
-    user = get_user(user_id) # (id, my, ai, int, chat)
+    user = get_user(user_id)
     
     msg = f"⚡ **CONNECTED**\n\n👤 You: {user[1]}\n🤖 AI: {user[2]}\n🏷️ Topic: {user[3]}\n\nSay Hi! 👇"
     
-    # Clear local history
     context.user_data['history'] = []
     
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -233,29 +229,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Menu Triggers
     if text == "🚀 Start Chat": await start_chat(update, context); return
     if text == "🛑 Stop Chat": await stop_chat(update, context); return
     if text == "⚙️ Configure AI": await configure_menu(update, context); return
     
-    # Check Status
     user = get_user(user_id)
-    if user[4] == 0: # Not chatting
+    if user[4] == 0: 
         await update.message.reply_text("⚠️ Click '🚀 Start Chat' first."); return
 
-    # --- AI PROCESS ---
     history = context.user_data.get('history', [])
     history.append({"role": "user", "content": text})
     
     await context.bot.send_chat_action(chat_id=user_id, action="typing")
     
-    # Get Reply
     ai_reply = await get_ai_reply(history, user[2], user[3])
     
-    # Log it
     log_chat(text, ai_reply)
     
-    # Delay & Send
     delay = min((len(ai_reply) * 0.1), 3.0) + random.uniform(0.5, 1.5)
     await asyncio.sleep(delay)
     
@@ -287,8 +277,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data.startswith("save_"):
         parts = data.split("_")
-        target = parts[1] # my or ai
-        val = parts[2]    # Male or Female
+        target = parts[1]
+        val = parts[2]
         update_user(uid, f"{target}_gender", val)
         await q.edit_message_text(f"✅ Saved: {val}")
         
@@ -297,14 +287,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_int'] = True
 
 async def handle_int_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Intercepts text if we are waiting for interests
     if context.user_data.get('awaiting_int'):
         update_user(update.effective_user.id, "interests", update.message.text)
         context.user_data['awaiting_int'] = False
         await update.message.reply_text("✅ Interests saved.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🚀 Start Chat")]]))
         return
-        
-    # Otherwise, handle as normal chat
     await handle_message(update, context)
 
 # ==============================================================================
@@ -314,16 +301,10 @@ if __name__ == '__main__':
     if not BOT_TOKEN:
         print("❌ ERROR: BOT_TOKEN missing in Render Environment Variables.")
     else:
-        # Load Data
         load_chat_logs()
-        
-        # App Builder
         app = ApplicationBuilder().token(BOT_TOKEN).build()
-        
-        # Handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT, handle_int_input))
-        
-        print("🤖 TRAINER BOT LIVE (Press Ctrl+C to stop)")
+        print("🤖 TRAINER BOT LIVE")
         app.run_polling()
