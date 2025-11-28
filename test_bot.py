@@ -2,24 +2,21 @@ import logging
 import os
 import asyncio
 import threading
-from flask import Flask # <--- ADD THIS
+from flask import Flask
 import psycopg2
 from psycopg2 import pool
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from ghost_engine import GhostEngine
 
-# --- DUMMY WEB SERVER FOR RENDER ---
+# --- DUMMY WEB SERVER ---
 app_flask = Flask(__name__)
-
 @app_flask.route('/')
-def health_check():
-    return "Bot is Alive!", 200
-
+def health_check(): return "Bot is Alive!", 200
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app_flask.run(host="0.0.0.0", port=port)
-# -----------------------------------
+# ------------------------
 
 # ENV VARS
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -27,13 +24,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# DB CONNECT
 try:
     DB_POOL = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
 except Exception as e:
     print(f"❌ DB Error: {e}")
 
-# INIT ENGINE
 GHOST = GhostEngine(DB_POOL)
 
 # --- MENUS ---
@@ -43,11 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(0, len(personas), 2):
         row = [InlineKeyboardButton(p[1], callback_data=f"ai_{p[0]}") for p in personas[i:i+2]]
         kb.append(row)
-    
-    await update.message.reply_text(
-        "🧪 **AI LAB SETUP**\n\n1️⃣ Choose the AI Persona:", 
-        reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
-    )
+    await update.message.reply_text("🧪 **AI LAB SETUP**\n\n1️⃣ Choose the AI Persona:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -75,9 +66,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_key = context.user_data['temp_ai']
         u_gen = context.user_data['temp_gen']
         
-        # FIX: Escape underscores to prevent Markdown errors
         clean_key = ai_key.replace("_", "\\_")
-        
         user_ctx = {'gender': u_gen, 'country': country}
         success = await GHOST.start_chat(uid, ai_key, user_ctx)
         
@@ -86,7 +75,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"✅ **CONNECTED**\n{info}\n\nSay 'Hi' to start!", parse_mode='Markdown')
             context.user_data['active'] = True
         else:
-            await q.edit_message_text("❌ Error starting AI.")
+            await q.edit_message_text("❌ Error starting AI. Check logs.")
         return
 
     if data.startswith("fb_"):
@@ -134,28 +123,26 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(result["delay"])
         kb = [[InlineKeyboardButton("👍 Good", callback_data="fb_1"), InlineKeyboardButton("👎 Bad", callback_data="fb_-1")]]
         context.user_data['last_exchange'] = (user_text, result["content"])
-        
-        # Safe send (No markdown to prevent crashes on AI output)
         await update.message.reply_text(result["content"], reply_markup=InlineKeyboardMarkup(kb))
+    
+    # [NEW] HANDLE ERROR
+    elif result.get("type") == "error":
+        await update.message.reply_text(result["content"])
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['active'] = False
     await update.message.reply_text("🛑 Chat stopped. /start to restart.")
 
 if __name__ == '__main__':
-    if not BOT_TOKEN:
-        print("❌ Error: BOT_TOKEN missing")
+    if not BOT_TOKEN: print("❌ Error: BOT_TOKEN missing")
     else:
-        # START FLASK IN BACKGROUND
         flask_thread = threading.Thread(target=run_flask)
         flask_thread.daemon = True
         flask_thread.start()
-
         app = ApplicationBuilder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stop", stop_command))
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat_handler))
-        
         print("🤖 TEST BOT ONLINE")
         app.run_polling()
