@@ -10,20 +10,16 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 
-# ACTIVE SESSIONS
 AI_SESSIONS = {} 
 
 class GhostEngine:
     def __init__(self, db_pool):
         self.db_pool = db_pool
-        self._init_db() # <--- AUTO-FIX THE DATABASE
+        self._init_db()
 
     def _init_db(self):
-        """Creates tables if they don't exist (Self-Healing)"""
         conn = self.db_pool.getconn()
         cur = conn.cursor()
-        
-        # 1. Create Tables
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ai_personas (
                 id SERIAL PRIMARY KEY,
@@ -42,13 +38,12 @@ class GhostEngine:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        
-        # 2. Populate Defaults (Only if empty)
+        # Populate defaults if empty
         cur.execute("SELECT COUNT(*) FROM ai_personas")
         if cur.fetchone()[0] == 0:
             personas = [
                 ('south_indian', '🇮🇳 South Indian (M)', 'You are a 21M engineering student from Bangalore. Speak English mixed with "Macha", "Da", "Ille". Friendly but defensive. If asked location, say Bangalore or Chennai.'),
-                ('north_indian', '🇮🇳 North Indian (M)', 'You are 19M from Delhi. Speak Hinglish. Aggressive, thirsty. Use "Bhai", "Kaisa hai". If partner says "M" (Male), you MUST ask "bhai any girls id?" or disconnect.'),
+                ('north_indian', '🇮🇳 North Indian (M)', 'You are 19M from Delhi. Speak Hinglish (Hindi in English text). Aggressive, thirsty. Use "Bhai", "Kaisa hai", "Ladki hai?". If partner says "M" (Male), you MUST ask "bhai any girls id?" or disconnect.'),
                 ('indo_teen', '🇮🇩 Indo Teen (F)', 'You are 17F from Jakarta. Use heavy Indo slang: "Wkwkwk", "Sange", "Co/Ce". Ask "Indo?" first. If they say India, say "skip" and disconnect.'),
                 ('american_girl', '🇺🇸 American (F)', 'You are Ashley, 19F from Florida. Bored, in college. Type lowercase, fast, uses "lol", "omg", "literally". Open to fun chat but hates boring people. Fake Snap: ash_baddiee.'),
                 ('indian_girl', '🇮🇳 Indian Girl (Tier 1)', 'You are 22F from South Mumbai. Speak perfect English. Rich, slightly arrogant. Hate creeps. If someone says "bobs/vegana", roast them: "Ew, learn to spell".'),
@@ -58,7 +53,6 @@ class GhostEngine:
             for p in personas:
                 cur.execute("INSERT INTO ai_personas (key_name, display_name, system_prompt) VALUES (%s, %s, %s)", p)
             print("✅ AI Tables Created & Populated.")
-            
         conn.commit()
         cur.close()
         self.db_pool.putconn(conn)
@@ -73,9 +67,10 @@ class GhostEngine:
         return rows
 
     async def start_chat(self, user_id, persona_key, user_context):
-        """
-        user_context: dict like {'gender': 'Male', 'country': 'USA'}
-        """
+        if not GOOGLE_API_KEY:
+            print("❌ ERROR: GOOGLE_API_KEY is missing in Environment Variables.")
+            return False
+
         conn = self.db_pool.getconn()
         cur = conn.cursor()
         cur.execute("SELECT system_prompt FROM ai_personas WHERE key_name = %s", (persona_key,))
@@ -86,9 +81,6 @@ class GhostEngine:
         if not row: return False
         
         base_prompt = row[0]
-        
-        # INJECT USER CONTEXT INTO BRAIN
-        # This tells the AI who it is talking to
         context_prompt = (
             f"{base_prompt}\n\n"
             f"[CURRENT SCENARIO]\n"
@@ -97,14 +89,14 @@ class GhostEngine:
             f"React accordingly based on your persona."
         )
         
-        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=context_prompt)
-        chat = model.start_chat(history=[])
-        
-        AI_SESSIONS[user_id] = {
-            'chat': chat,
-            'persona': persona_key
-        }
-        return True
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=context_prompt)
+            chat = model.start_chat(history=[])
+            AI_SESSIONS[user_id] = {'chat': chat, 'persona': persona_key}
+            return True
+        except Exception as e:
+            print(f"❌ Gemini Init Error: {e}")
+            return False
 
     async def process_message(self, user_id, text):
         session = AI_SESSIONS.get(user_id)
@@ -120,15 +112,24 @@ class GhostEngine:
             return "TRIGGER_SKIP"
 
         try:
+            # Generate AI Response
             response = await session['chat'].send_message_async(text)
             ai_text = response.text.strip()
             
-            # Latency: 1s + 0.05s per char (Max 5s)
             wait_time = min(1.0 + (len(ai_text) * 0.05), 5.0)
-            
             return {"type": "text", "content": ai_text, "delay": wait_time}
-        except:
-            return {"type": "error", "content": "AI Error"}
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"🔥 AI GENERATION ERROR: {error_msg}")
+            
+            # Common Fixes for User
+            readable_error = "AI Error."
+            if "API_KEY" in error_msg: readable_error = "Check Google API Key."
+            if "quota" in error_msg.lower(): readable_error = "API Quota Exceeded (Free Tier Limit)."
+            if "location" in error_msg.lower(): readable_error = "Server Location Not Supported by Gemini."
+            
+            return {"type": "error", "content": f"⚠️ {readable_error}\nRaw: {error_msg[:50]}..."}
 
     def save_feedback(self, user_id, user_input, ai_response, rating):
         session = AI_SESSIONS.get(user_id)
