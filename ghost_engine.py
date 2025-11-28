@@ -131,7 +131,8 @@ class GhostEngine:
             def call_groq():
                 return CLIENT.chat.completions.create(
                     messages=messages,
-                    model="llama3-70b-8192", # High intelligence, great roleplay
+                    # We use the standard Llama 3.1 70B model ID supported by Groq
+                    model="llama-3.1-70b-versatile", 
                     temperature=0.7,
                     max_tokens=150
                 )
