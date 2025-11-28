@@ -2,14 +2,17 @@ import os
 import random
 import time
 import asyncio
-import google.generativeai as genai
+from groq import Groq
 from psycopg2 import pool
 
 # CONFIG
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CLIENT = None
+if GROQ_API_KEY:
+    CLIENT = Groq(api_key=GROQ_API_KEY)
 
+# ACTIVE SESSIONS
+# Format: {user_id: {'persona': 'key', 'history': []}}
 AI_SESSIONS = {} 
 
 class GhostEngine:
@@ -38,12 +41,13 @@ class GhostEngine:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Populate defaults if empty
+        
+        # DEFAULTS
         cur.execute("SELECT COUNT(*) FROM ai_personas")
         if cur.fetchone()[0] == 0:
             personas = [
                 ('south_indian', '🇮🇳 South Indian (M)', 'You are a 21M engineering student from Bangalore. Speak English mixed with "Macha", "Da", "Ille". Friendly but defensive. If asked location, say Bangalore or Chennai.'),
-                ('north_indian', '🇮🇳 North Indian (M)', 'You are 19M from Delhi. Speak Hinglish (Hindi in English text). Aggressive, thirsty. Use "Bhai", "Kaisa hai", "Ladki hai?". If partner says "M" (Male), you MUST ask "bhai any girls id?" or disconnect.'),
+                ('north_indian', '🇮🇳 North Indian (M)', 'You are 19M from Delhi. Speak Hinglish. Aggressive, thirsty. Use "Bhai", "Kaisa hai", "Ladki hai?". If partner says "M" (Male), you MUST ask "bhai any girls id?" or disconnect.'),
                 ('indo_teen', '🇮🇩 Indo Teen (F)', 'You are 17F from Jakarta. Use heavy Indo slang: "Wkwkwk", "Sange", "Co/Ce". Ask "Indo?" first. If they say India, say "skip" and disconnect.'),
                 ('american_girl', '🇺🇸 American (F)', 'You are Ashley, 19F from Florida. Bored, in college. Type lowercase, fast, uses "lol", "omg", "literally". Open to fun chat but hates boring people. Fake Snap: ash_baddiee.'),
                 ('indian_girl', '🇮🇳 Indian Girl (Tier 1)', 'You are 22F from South Mumbai. Speak perfect English. Rich, slightly arrogant. Hate creeps. If someone says "bobs/vegana", roast them: "Ew, learn to spell".'),
@@ -52,7 +56,6 @@ class GhostEngine:
             ]
             for p in personas:
                 cur.execute("INSERT INTO ai_personas (key_name, display_name, system_prompt) VALUES (%s, %s, %s)", p)
-            print("✅ AI Tables Created & Populated.")
         conn.commit()
         cur.close()
         self.db_pool.putconn(conn)
@@ -67,8 +70,8 @@ class GhostEngine:
         return rows
 
     async def start_chat(self, user_id, persona_key, user_context):
-        if not GOOGLE_API_KEY:
-            print("❌ ERROR: GOOGLE_API_KEY is missing in Environment Variables.")
+        if not CLIENT:
+            print("❌ ERROR: GROQ_API_KEY is missing.")
             return False
 
         conn = self.db_pool.getconn()
@@ -81,22 +84,22 @@ class GhostEngine:
         if not row: return False
         
         base_prompt = row[0]
-        context_prompt = (
-            f"{base_prompt}\n\n"
-            f"[CURRENT SCENARIO]\n"
-            f"You are connected to a Stranger.\n"
-            f"Stranger Details: {user_context.get('gender')}, from {user_context.get('country')}.\n"
-            f"React accordingly based on your persona."
+        
+        # SYSTEM PROMPT CONSTRUCTION
+        system_msg = (
+            f"{base_prompt}\n"
+            f"[CONTEXT: You are chatting with a Stranger on an anonymous app.]\n"
+            f"[STRANGER DETAILS: {user_context.get('gender')}, from {user_context.get('country')}]\n"
+            f"IMPORTANT: Act human. Make typos occasionally. Keep replies short (under 15 words) unless telling a story."
         )
         
-        try:
-            model = genai.GenerativeModel('gemini-pro', system_instruction=context_prompt)
-            chat = model.start_chat(history=[])
-            AI_SESSIONS[user_id] = {'chat': chat, 'persona': persona_key}
-            return True
-        except Exception as e:
-            print(f"❌ Gemini Init Error: {e}")
-            return False
+        # Reset Session
+        AI_SESSIONS[user_id] = {
+            'persona': persona_key,
+            'system': system_msg,
+            'history': [] # Groq is stateless, we manage history here
+        }
+        return True
 
     async def process_message(self, user_id, text):
         session = AI_SESSIONS.get(user_id)
@@ -105,31 +108,50 @@ class GhostEngine:
         persona = session['persona']
         text_lower = text.strip().lower()
 
-        # LOGIC TRIGGERS
+        # --- LOGIC TRIGGERS ---
         if persona == 'north_indian' and text_lower in ['m', 'male']:
             return "TRIGGER_INDIAN_MALE_BEG"
         if persona == 'indo_teen' and ('india' in text_lower or 'indian' in text_lower):
             return "TRIGGER_SKIP"
 
+        # --- GROQ GENERATION ---
         try:
-            # Generate AI Response
-            response = await session['chat'].send_message_async(text)
-            ai_text = response.text.strip()
+            # 1. Prepare Messages
+            messages = [{"role": "system", "content": session['system']}]
             
-            wait_time = min(1.0 + (len(ai_text) * 0.05), 5.0)
+            # Add History (Last 6 turns to save tokens)
+            messages.extend(session['history'][-6:])
+            
+            # Add Current User Input
+            messages.append({"role": "user", "content": text})
+
+            # 2. Call API (Running in Executor for async compatibility)
+            loop = asyncio.get_running_loop()
+            
+            def call_groq():
+                return CLIENT.chat.completions.create(
+                    messages=messages,
+                    model="llama3-70b-8192", # High intelligence, great roleplay
+                    temperature=0.7,
+                    max_tokens=150
+                )
+            
+            completion = await loop.run_in_executor(None, call_groq)
+            ai_text = completion.choices[0].message.content.strip()
+            
+            # 3. Update History
+            session['history'].append({"role": "user", "content": text})
+            session['history'].append({"role": "assistant", "content": ai_text})
+
+            # 4. Latency
+            wait_time = min(0.8 + (len(ai_text) * 0.03), 4.0)
+            
             return {"type": "text", "content": ai_text, "delay": wait_time}
             
         except Exception as e:
             error_msg = str(e)
-            print(f"🔥 AI GENERATION ERROR: {error_msg}")
-            
-            # Common Fixes for User
-            readable_error = "AI Error."
-            if "API_KEY" in error_msg: readable_error = "Check Google API Key."
-            if "quota" in error_msg.lower(): readable_error = "API Quota Exceeded (Free Tier Limit)."
-            if "location" in error_msg.lower(): readable_error = "Server Location Not Supported by Gemini."
-            
-            return {"type": "error", "content": f"⚠️ {readable_error}\nRaw: {error_msg[:50]}..."}
+            print(f"🔥 GROQ ERROR: {error_msg}")
+            return {"type": "error", "content": f"⚠️ Groq Error: {error_msg[:50]}..."}
 
     def save_feedback(self, user_id, user_input, ai_response, rating):
         session = AI_SESSIONS.get(user_id)
