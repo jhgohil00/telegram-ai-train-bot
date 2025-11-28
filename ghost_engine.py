@@ -16,9 +16,54 @@ AI_SESSIONS = {}
 class GhostEngine:
     def __init__(self, db_pool):
         self.db_pool = db_pool
+        self._init_db() # <--- AUTO-FIX THE DATABASE
+
+    def _init_db(self):
+        """Creates tables if they don't exist (Self-Healing)"""
+        conn = self.db_pool.getconn()
+        cur = conn.cursor()
+        
+        # 1. Create Tables
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_personas (
+                id SERIAL PRIMARY KEY,
+                key_name TEXT UNIQUE,
+                display_name TEXT,
+                system_prompt TEXT
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_training_data (
+                id SERIAL PRIMARY KEY,
+                persona_key TEXT,
+                user_input TEXT,
+                ai_response TEXT,
+                rating INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # 2. Populate Defaults (Only if empty)
+        cur.execute("SELECT COUNT(*) FROM ai_personas")
+        if cur.fetchone()[0] == 0:
+            personas = [
+                ('south_indian', '🇮🇳 South Indian (M)', 'You are a 21M engineering student from Bangalore. Speak English mixed with "Macha", "Da", "Ille". Friendly but defensive. If asked location, say Bangalore or Chennai.'),
+                ('north_indian', '🇮🇳 North Indian (M)', 'You are 19M from Delhi. Speak Hinglish. Aggressive, thirsty. Use "Bhai", "Kaisa hai". If partner says "M" (Male), you MUST ask "bhai any girls id?" or disconnect.'),
+                ('indo_teen', '🇮🇩 Indo Teen (F)', 'You are 17F from Jakarta. Use heavy Indo slang: "Wkwkwk", "Sange", "Co/Ce". Ask "Indo?" first. If they say India, say "skip" and disconnect.'),
+                ('american_girl', '🇺🇸 American (F)', 'You are Ashley, 19F from Florida. Bored, in college. Type lowercase, fast, uses "lol", "omg", "literally". Open to fun chat but hates boring people. Fake Snap: ash_baddiee.'),
+                ('indian_girl', '🇮🇳 Indian Girl (Tier 1)', 'You are 22F from South Mumbai. Speak perfect English. Rich, slightly arrogant. Hate creeps. If someone says "bobs/vegana", roast them: "Ew, learn to spell".'),
+                ('kpop_stan', '🇰🇷/🇵🇭 K-Pop Stan (F)', 'You are 16F from Manila. Obsessed with Korea. Use CAPS. Talk about BTS, Blackpink. Use "Oppa", "Stan", "Crying".'),
+                ('african_bro', '🇳🇬 African (M)', 'You are 22M from Nigeria. Use "My guy", "How far", "Wagwan". Chill vibes. Laughs a lot.')
+            ]
+            for p in personas:
+                cur.execute("INSERT INTO ai_personas (key_name, display_name, system_prompt) VALUES (%s, %s, %s)", p)
+            print("✅ AI Tables Created & Populated.")
+            
+        conn.commit()
+        cur.close()
+        self.db_pool.putconn(conn)
 
     def get_personas_list(self):
-        """Fetches list of available personas for the menu"""
         conn = self.db_pool.getconn()
         cur = conn.cursor()
         cur.execute("SELECT key_name, display_name FROM ai_personas")
@@ -27,29 +72,10 @@ class GhostEngine:
         self.db_pool.putconn(conn)
         return rows
 
-    def get_winning_examples(self, persona_key, user_input):
-        """Finds past 'Thumbs Up' chats to mimic"""
-        conn = self.db_pool.getconn()
-        cur = conn.cursor()
-        # Find 2 random 'Good' examples for this persona
-        cur.execute("""
-            SELECT user_input, ai_response FROM ai_training_data 
-            WHERE persona_key = %s AND rating = 1 
-            ORDER BY RANDOM() LIMIT 2
-        """, (persona_key,))
-        rows = cur.fetchall()
-        cur.close()
-        self.db_pool.putconn(conn)
-        
-        examples = ""
-        if rows:
-            examples = "\n\n[STYLE REFERENCE - MIMIC THESE EXAMPLES]:\n"
-            for r in rows:
-                examples += f"User: {r[0]}\nYou: {r[1]}\n"
-        return examples
-
-    async def start_chat(self, user_id, persona_key):
-        """Initializes a new session"""
+    async def start_chat(self, user_id, persona_key, user_context):
+        """
+        user_context: dict like {'gender': 'Male', 'country': 'USA'}
+        """
         conn = self.db_pool.getconn()
         cur = conn.cursor()
         cur.execute("SELECT system_prompt FROM ai_personas WHERE key_name = %s", (persona_key,))
@@ -59,16 +85,24 @@ class GhostEngine:
         
         if not row: return False
         
-        system_prompt = row[0]
+        base_prompt = row[0]
         
-        # Initialize Gemini
-        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_prompt)
+        # INJECT USER CONTEXT INTO BRAIN
+        # This tells the AI who it is talking to
+        context_prompt = (
+            f"{base_prompt}\n\n"
+            f"[CURRENT SCENARIO]\n"
+            f"You are connected to a Stranger.\n"
+            f"Stranger Details: {user_context.get('gender')}, from {user_context.get('country')}.\n"
+            f"React accordingly based on your persona."
+        )
+        
+        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=context_prompt)
         chat = model.start_chat(history=[])
         
         AI_SESSIONS[user_id] = {
             'chat': chat,
-            'persona': persona_key,
-            'step_counter': 0
+            'persona': persona_key
         }
         return True
 
@@ -79,49 +113,30 @@ class GhostEngine:
         persona = session['persona']
         text_lower = text.strip().lower()
 
-        # --- 1. SPECIAL LOGIC TRIGGERS ---
-        
-        # A. NORTH INDIAN MALE LOGIC (The "M" Trigger)
+        # LOGIC TRIGGERS
         if persona == 'north_indian' and text_lower in ['m', 'male']:
-            # Scripted sequence for realism
             return "TRIGGER_INDIAN_MALE_BEG"
-
-        # B. INDO LOGIC (The "India" Skip)
         if persona == 'indo_teen' and ('india' in text_lower or 'indian' in text_lower):
             return "TRIGGER_SKIP"
 
-        # --- 2. AI GENERATION ---
-        
-        # Inject RAG (Past Wins)
-        examples = self.get_winning_examples(persona, text)
-        full_prompt = f"{text}{examples}"
-        
         try:
-            # Generate
-            response = await session['chat'].send_message_async(full_prompt)
+            response = await session['chat'].send_message_async(text)
             ai_text = response.text.strip()
             
-            # --- 3. LATENCY SIMULATION ---
-            # 1s base + 0.05s per character
-            wait_time = 1.0 + (len(ai_text) * 0.05)
-            # Cap at 5s so it doesn't feel broken
-            wait_time = min(wait_time, 5.0)
+            # Latency: 1s + 0.05s per char (Max 5s)
+            wait_time = min(1.0 + (len(ai_text) * 0.05), 5.0)
             
             return {"type": "text", "content": ai_text, "delay": wait_time}
-            
-        except Exception as e:
+        except:
             return {"type": "error", "content": "AI Error"}
 
     def save_feedback(self, user_id, user_input, ai_response, rating):
         session = AI_SESSIONS.get(user_id)
         if not session: return
-        
         conn = self.db_pool.getconn()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO ai_training_data (persona_key, user_input, ai_response, rating)
-            VALUES (%s, %s, %s, %s)
-        """, (session['persona'], user_input, ai_response, rating))
+        cur.execute("INSERT INTO ai_training_data (persona_key, user_input, ai_response, rating) VALUES (%s, %s, %s, %s)", 
+                    (session['persona'], user_input, ai_response, rating))
         conn.commit()
         cur.close()
         self.db_pool.putconn(conn)
