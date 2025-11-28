@@ -12,7 +12,6 @@ if GROQ_API_KEY:
     CLIENT = Groq(api_key=GROQ_API_KEY)
 
 # ACTIVE SESSIONS
-# Format: {user_id: {'persona': 'key', 'history': []}}
 AI_SESSIONS = {} 
 
 class GhostEngine:
@@ -85,7 +84,7 @@ class GhostEngine:
         
         base_prompt = row[0]
         
-        # SYSTEM PROMPT CONSTRUCTION
+        # SYSTEM PROMPT
         system_msg = (
             f"{base_prompt}\n"
             f"[CONTEXT: You are chatting with a Stranger on an anonymous app.]\n"
@@ -97,7 +96,7 @@ class GhostEngine:
         AI_SESSIONS[user_id] = {
             'persona': persona_key,
             'system': system_msg,
-            'history': [] # Groq is stateless, we manage history here
+            'history': []
         }
         return True
 
@@ -118,21 +117,17 @@ class GhostEngine:
         try:
             # 1. Prepare Messages
             messages = [{"role": "system", "content": session['system']}]
-            
-            # Add History (Last 6 turns to save tokens)
-            messages.extend(session['history'][-6:])
-            
-            # Add Current User Input
+            messages.extend(session['history'][-6:]) # Keep context small
             messages.append({"role": "user", "content": text})
 
-            # 2. Call API (Running in Executor for async compatibility)
+            # 2. Call API
             loop = asyncio.get_running_loop()
             
             def call_groq():
                 return CLIENT.chat.completions.create(
                     messages=messages,
-                    # We use the standard Llama 3.1 70B model ID supported by Groq
-                    model="llama-3.1-70b-versatile", 
+                    # [FIXED] Using the exact model you requested
+                    model="llama-3.3-70b-versatile", 
                     temperature=0.7,
                     max_tokens=150
                 )
