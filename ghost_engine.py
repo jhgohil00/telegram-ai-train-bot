@@ -90,7 +90,7 @@ class GhostEngine:
         )
         
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=context_prompt)
+            model = genai.GenerativeModel('gemini-1.5-flash-001', system_instruction=context_prompt)
             chat = model.start_chat(history=[])
             AI_SESSIONS[user_id] = {'chat': chat, 'persona': persona_key}
             return True
