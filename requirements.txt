@@ -1,4 +1,3 @@
 python-telegram-bot
-groq
 psycopg2-binary
-flask
+google-generativeai
