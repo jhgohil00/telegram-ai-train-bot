@@ -24,7 +24,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# DB CONNECT
 try:
     DB_POOL = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
 except Exception as e:
@@ -34,9 +33,7 @@ GHOST = GhostEngine(DB_POOL)
 
 # --- MENUS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Clear old data on new start
     context.user_data.clear()
-    
     personas = GHOST.get_personas_list()
     kb = []
     for i in range(0, len(personas), 2):
@@ -44,7 +41,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb.append(row)
     
     await update.message.reply_text(
-        "🧪 **AI LAB SETUP**\n\n1️⃣ Choose the AI Persona:", 
+        "🧪 **AI LAB SETUP**\n\n1️⃣ Select AI Archetype:", 
         reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
     )
 
@@ -54,63 +51,82 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     uid = q.from_user.id
 
-    # STEP 2: SAVE AI & ASK USER GENDER
+    # STEP 2: SELECT AI GENDER
     if data.startswith("ai_"):
-        context.user_data['temp_ai'] = data.split("_", 1)[1]
+        context.user_data['temp_ai_key'] = data.split("_", 1)[1]
         
         kb = [
-            [InlineKeyboardButton("👨 Male", callback_data="ugen_Male"), 
-             InlineKeyboardButton("👩 Female", callback_data="ugen_Female")]
+            [InlineKeyboardButton("🤖 AI is Male", callback_data="aigen_Male"), 
+             InlineKeyboardButton("🤖 AI is Female", callback_data="aigen_Female")]
         ]
         await q.edit_message_text(
-            "2️⃣ **Who are you pretending to be?** (Gender)", 
+            "2️⃣ **Select AI Gender:**", 
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
         return
 
-    # STEP 3: SAVE GENDER & ASK COUNTRY
+    # STEP 3: SELECT USER GENDER
+    if data.startswith("aigen_"):
+        context.user_data['temp_ai_gen'] = data.split("_")[1]
+        
+        kb = [
+            [InlineKeyboardButton("👤 I am Male", callback_data="ugen_Male"), 
+             InlineKeyboardButton("👤 I am Female", callback_data="ugen_Female")]
+        ]
+        await q.edit_message_text(
+            "3️⃣ **Who are you?** (Your Gender)", 
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+        return
+
+    # STEP 4: SELECT USER COUNTRY
     if data.startswith("ugen_"):
-        context.user_data['temp_gen'] = data.split("_")[1]
+        context.user_data['temp_u_gen'] = data.split("_")[1]
         
         kb = [
             [InlineKeyboardButton("🇮🇳 India", callback_data="uctry_India"), 
              InlineKeyboardButton("🇺🇸 USA", callback_data="uctry_USA")],
             [InlineKeyboardButton("🇬🇧 UK", callback_data="uctry_UK"), 
-             InlineKeyboardButton("🇵🇭 Phil/Asia", callback_data="uctry_Asia")]
+             InlineKeyboardButton("🇵🇭 Asia", callback_data="uctry_Asia")]
         ]
         await q.edit_message_text(
-            "3️⃣ **Where are you from?**", 
+            "4️⃣ **Where are you from?**", 
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
         return
 
-    # STEP 4: START CHAT
+    # STEP 5: START CHAT
     if data.startswith("uctry_"):
-        # [FIX] CHECK IF DATA EXISTS (Prevents Crash on Restart)
-        ai_key = context.user_data.get('temp_ai')
-        u_gen = context.user_data.get('temp_gen')
-        
-        if not ai_key or not u_gen:
-            await q.edit_message_text("❌ **Session Expired (Bot Restarted).**\nPlease type /start again.")
+        # SAFETY CHECK
+        if 'temp_ai_key' not in context.user_data:
+            await q.edit_message_text("❌ Session expired. Type /start.")
             return
 
-        country = data.split("_")[1]
-        clean_key = ai_key.replace("_", "\\_") # Fix markdown error
+        u_country = data.split("_")[1]
+        ai_key = context.user_data['temp_ai_key']
+        ai_gen = context.user_data['temp_ai_gen']
+        u_gen = context.user_data['temp_u_gen']
         
-        # Prepare context for AI
-        user_ctx = {'gender': u_gen, 'country': country}
+        user_ctx = {'gender': u_gen, 'country': u_country}
         
-        success = await GHOST.start_chat(uid, ai_key, user_ctx)
+        success = await GHOST.start_chat(uid, ai_key, ai_gen, user_ctx)
+        
+        clean_key = ai_key.replace("_", " ").title()
         
         if success:
-            info = f"🤖 **AI:** {clean_key}\n👤 **You:** {u_gen}, {country}"
-            await q.edit_message_text(f"✅ **CONNECTED**\n{info}\n\nSay 'Hi' to start!", parse_mode='Markdown')
+            msg = (
+                f"✅ **CONNECTED**\n"
+                f"🤖 **AI:** {clean_key} ({ai_gen})\n"
+                f"👤 **User:** {u_gen} from {u_country}\n\n"
+                f"_Bot is typing slower to mimic human..._"
+            )
+            await q.edit_message_text(msg, parse_mode='Markdown')
             context.user_data['active'] = True
         else:
-            await q.edit_message_text("❌ Error starting AI (Check Logs).")
+            await q.edit_message_text("❌ Error starting AI.")
         return
 
-    # FEEDBACK HANDLER
+    # FEEDBACK
     if data.startswith("fb_"):
         rating = int(data.split("_")[1])
         last = context.user_data.get('last_exchange')
@@ -128,14 +144,17 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
     
+    # 1. Typing action (loops if delay is long)
     await context.bot.send_chat_action(chat_id=user_id, action="typing")
+    
+    # 2. Get Result
     result = await GHOST.process_message(user_id, user_text)
     
     if not result:
         await update.message.reply_text("❌ Session expired. /start")
         return
 
-    # LOGIC TRIGGERS
+    # 3. Handle Special Logic
     if result == "TRIGGER_SKIP":
         await asyncio.sleep(0.5)
         await update.message.reply_text("🚫 **[AI LOGIC]** Partner Disconnected (Skip Trigger).")
@@ -143,27 +162,35 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if result == "TRIGGER_INDIAN_MALE_BEG":
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
         await update.message.reply_text("bro any girls id?")
-        await context.bot.send_chat_action(chat_id=user_id, action="typing")
-        await asyncio.sleep(2)
+        await asyncio.sleep(2.5)
         await update.message.reply_text("give me")
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
+        await update.message.reply_text("im single")
+        await asyncio.sleep(1.0)
         await update.message.reply_text("🚫 **[AI LOGIC]** Partner Disconnected.")
         context.user_data['active'] = False
         return
 
-    # NORMAL REPLY
+    # 4. Handle Text Reply
     if result.get("type") == "text":
-        await asyncio.sleep(result["delay"])
+        delay = result["delay"]
+        
+        # Keep sending "typing..." status if delay is long
+        if delay > 4:
+            await asyncio.sleep(2)
+            await context.bot.send_chat_action(chat_id=user_id, action="typing")
+            await asyncio.sleep(delay - 2)
+        else:
+            await asyncio.sleep(delay)
         
         kb = [[InlineKeyboardButton("👍 Good", callback_data="fb_1"), InlineKeyboardButton("👎 Bad", callback_data="fb_-1")]]
         context.user_data['last_exchange'] = (user_text, result["content"])
         
-        # [FIX] Removed Markdown parsing for AI reply to prevent crashes on special chars
+        # Plain text send
         await update.message.reply_text(result["content"], reply_markup=InlineKeyboardMarkup(kb))
     
-    # ERROR REPLY
     elif result.get("type") == "error":
         await update.message.reply_text(result["content"])
 
